@@ -1,0 +1,509 @@
+---
+title: "Wine Project"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+# Introduction
+
+This data set contains 12 attributes of wine plus a quality, which I treated as both an attribute and an outcome. This started as actually two data sets, one each for red wine and white wine.  I combined the two sets and there are about 6500 observations. This is a good size to work with.  In the combined data set I created a binary variable for red and white wines.  There were 4900 observations of white wine and about 1600 or red wine.  I wanted to simulate a data set that classified a tumor as a benign or malign.  I assumed most tumors are benign and the challenge is to correctly identify the malign tumor.  Therefore I assigned 0 to white wine, simulating a negative on a cancer screening and 1 to red wine for a positive.  However, I wanted to use models to see if I could accurately predict the quality of wine, which is a continuous variable.  Also, I felt like wine characteristics are a little more interesting to work with than obscure attributes of cells.  
+
+I use several models and frequently switch back between predicting the quality on a continuous scale (e.g. linear regression) and the classifier of red or white (e.g. logistic regression).  K nearest neighbor and support vector machine were used as classifier.  Finally, a decision tree and random forest where used as both.  I tried to show how models could be used in different ways.  
+
+# Import libraries
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(outliers)
+library(ggplot2)
+library(DAAG)
+library(simputation)
+library(caret)
+library(boot)
+library(kernlab)
+library(tree)
+library(mice)
+library(randomForest)
+library(kknn)
+```
+
+# Import and observe data sets
+
+```{r import}
+#import and view red wine data set 
+red <- read.csv('https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv', sep=';')
+print(paste('The class of the red wine data set is:', class(red)))
+print('The dimensions of the red wine data set are:')
+            dim(red)
+head(red)
+print(paste('Total missing values in the red wine data set is:', sum(is.na(red))))
+
+#import and view white wine data set 
+white<- read.csv('https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv', sep=';')
+print(paste('The class of the red wine data set is:', class(white)))
+print('The dimensions of the red wine data set are:')
+            dim(white)
+head(white)
+print(paste('Total missing values in the red wine data set is:', sum(is.na(white))))
+
+
+# observe the quality ratings of data set
+print('The range of values for quality in the red wine data set are as follow:')
+sort(unique(red$quality))
+print('The range of values for quality in the white wine data set are as follow:')
+sort(unique(white$quality))
+```
+
+## Check for outliers
+The grubbs test identifies several outliers.  Actually most attributes in both the red and white sets have an outlier.  However, I don't have any reason to believe these are erroneious points that don't below in the data set.  Therefore, I am not doing to remove any of the outliers.  However, I do will plot each of these as a histogram for further analysis.  
+
+```{r outliers}
+
+# check for outliers
+for (i in 1:11) {
+  print(paste("Outlier test for red wine", colnames(red)[i]))
+  print(grubbs.test(red[,i]), type = 11)
+  print(paste("Outlier test for white wine", colnames(red)[i]))
+  print(grubbs.test(white[,i]), type = 11)
+}
+
+
+```
+
+## Classify and combine the data sets
+As mentioned in the introduction, I assigned white wine observations a zero (simulating a negative test) and red wine observations a 1 (simulating a positive test). Then I combined the data sets and randomly shuffled the observations.  
+
+```{r classify and combine}
+# In order to set up a classification predictor assign a binary variable to each data set
+# Part of this project is to simulate predicting benign vs. malign results
+# Because there are more whites, I simulate white as benign and assigned it to 0; red is malign so it is assigned a 1
+white_binary <- white %>% mutate(class = 0)
+red_binary <- red %>% mutate(class = 1)
+
+# Combine the data sets, randomly shuffle the rows and reset the index
+set.seed(12)
+rw_comb <- rbind(white_binary, red_binary)[sample(nrow(white_binary) + nrow( red_binary)),] %>%
+          mutate(class = as.factor(class))
+row.names(rw_comb) <- NULL
+print('The dimensions of the combined data set are: ')
+dim(rw_comb)
+head(rw_comb)
+
+```
+
+## Overlaying histograms 
+Here are the overlaying histograms.  One part that is a little confusing is the red fill actually represents white wines.  Also, there are about three times the amount of white wines as red wines, so I used density instead of count on the y-axis.  This allows comparison of the distribution.  I want to see how the distributions differ without being distracted by white having more counts than red.  Some attributes such as total sulfur dioxide appear to be different distributions while others like alcohol have a lot of overlap.  I suppose that makes sense.  Both red and white wine contain alcohol that vary from around 8% to 15%.  Likewise our grubbs test told us us 14.9 is an outlier for red wine with a p-value of .02.  However, it is definitely possible for a red wine to have a 14.9% alcohol content, certainly higher than average, but no reason to attribute that value to an erroneous data point.  Similarly, chlorides is an outlier for red wine.  However, if you removed the highest value, the next highest value would also be an outlier.  This would continue over several data points because this is right skewed distribution.  
+
+```{r overlaying histograms }
+# overlaying histograms
+for (i in 1:11) {
+  print(ggplot(rw_comb, aes(x=rw_comb[,i], y=..density.., color = class, fill=class)) + 
+    geom_histogram(bins=40, alpha=.5, position='identity')+
+    labs(x=colnames(rw_comb)[i]))
+}
+```
+
+## Scale and Parition the data
+I scaled all the predictors and left the quality attribute unscaled because it is an outcome.  Simiraliy I did not scale the binary variable identifying the red and white wines.  
+
+Then I randomly partitioned the data set, 80% to the training set and 20% to the test set.  
+
+```{r scale and partition the data}
+# scale the data
+rw_comb_scale <- cbind(scale(rw_comb[,1:11]), rw_comb[,12:13]) 
+
+# In case I needed to reference the original red and wine data sets, I scaled these too, but I didn't wind up using them.  
+#red_scale <- cbind(scale(red[,1:11]), red[,12])
+#white_scale <- cbind(scale(white[,1:11]), white[,12])
+
+# partition the data into the training set and test set 
+set.seed(12)
+test_idx <- createDataPartition(rw_comb_scale$class, times=1, p=.2, list=FALSE)
+rw_comb_test <- rw_comb_scale[test_idx,]
+rw_comb_train <- rw_comb_scale[-test_idx,]
+```
+
+## Establish a baseline RMSE 
+I took the mean and median of the training set and used these values as the prediction value for both the training and test sets.  Recall, the smaller the RMSE the better.  As expected the mean as a predictor yields a slighter better RMSE than the median.  Oddly, there is a slightly better RMSE on the test set for the median than the training set.  The median is not ordinarily used as the model.  I basically just wanted to show that the mean is gives a slightly better RMSE than the median.  However, if different models    
+
+```{r message=FALSE}
+#take the average of the training set
+avg <- mean(rw_comb_train$quality)
+print(avg)
+med <- median(rw_comb_train$quality)
+print(med)
+
+#compute the RMSE of on the average
+rmse_train_avg <- sqrt(mean((rw_comb_train$quality - avg)^2))
+rmse_test_avg <- sqrt(mean((rw_comb_test$quality - avg)^2))
+
+rmse_train_med <- sqrt(mean((rw_comb_train$quality - med)^2))
+rmse_test_med <- sqrt(mean((rw_comb_test$quality - med)^2))
+
+#build a table to compare RMSE
+rmse_results <- data_frame(method = "Just the average on training set", RMSE = rmse_train_avg)
+rmse_results <- bind_rows(rmse_results, data_frame(method = "Just the average on test set", RMSE = rmse_test_avg))
+rmse_results <- bind_rows(rmse_results, data_frame(method = "Just the median on training set", RMSE = rmse_train_med))
+rmse_results <- bind_rows(rmse_results, data_frame(method = "Just the median on test set", RMSE = rmse_test_med))
+rmse_results %>% knitr::kable()
+```
+## Linear regression
+I ran a simple linear regression model.  The RMSE on the test set went down to .736, and this is slightly higher than the training set which is what we would expect.  There is only p-value that is over .05, which is citric acid.  It has a high p-value of .536, which you cannot reject the null hypothesis that the coefficient is not zero.  It is easier to explain a small p-value, which means we can strongly reject the null hypothesis that the coefficient is zero.  However, the citric accid coefficient is only -.008, which is the smallest coefficient in the model.  Therefore, I don't think there is negative impact.  
+
+However, what is trouble about this model is the low R-squared.  That tells me linear regression may not be the best model.  
+
+```{r}
+# linear regression to predict quality
+lm_model <- lm(quality~., data=rw_comb_train)
+summary(lm_model)
+y_hat_train <- predict(lm_model)
+
+y_hat_test <- predict(lm_model, rw_comb_test)
+
+
+#calculate the RMSE on the linear regression model and at to rmse_results table
+rmse_train <- sqrt(mean((rw_comb_train$quality - y_hat_train)^2))
+rmse_test <- sqrt(mean((rw_comb_test$quality - y_hat_test)^2))
+rmse_results <- bind_rows(rmse_results, data_frame(method = "Linear regression on training set", RMSE = rmse_train))
+rmse_results <- bind_rows(rmse_results, data_frame(method = "Linear regression on test set", RMSE = rmse_test))
+rmse_results %>% knitr::kable()
+```
+
+## Gaining a better understanding of data and lm model
+
+Normally, when predicting a continuous outcome with models such as linear regression, the goal is not to measure an exact prediction.  Rather the goal is to minimize the error.  However, the quality rating only has 7 possible outcomes.  So I rounded the prediction value to the nearest integer and conducted an accuracy test of how many predictions were exactly right.  I got about 53% accuracy on the test set.  Then I ran a jitter plot.  I noticed that most predicted values are either 5 or 6, some 7s and very few of the other 4 values.  So most of the predicted values are within +or- 1 of the actual value. 
+
+```{r accuracy test, warning=FALSE, message=FALSE}
+# what percentage of the rating can be predicted exactly from the rounded y_hat
+train_accuracy <- mean(round(y_hat_train) == rw_comb_train$quality)
+test_accuracy <- mean(round(y_hat_test) == rw_comb_test$quality)
+accuracy_results <- data_frame(method = "Linear regression on training set", Accuracy = train_accuracy)
+accuracy_results <- bind_rows(accuracy_results, data_frame(method = "Linear regression on test set", Accuracy=test_accuracy))
+accuracy_results
+#add the prediction to the the column 
+rw_comb_test_pred <- rw_comb_test %>% mutate(y_hat = y_hat_test)
+
+#review the plot of predicted (y-axis) as a function of actual (x-axis) quality ratings
+ggplot(rw_comb_test_pred, aes(quality, round(y_hat_test), col=class)) + geom_jitter()+xlim(3,9)+ylim(3,9)+
+  labs(x="Actual Quality Rating", y="Predicted Quality Rating", title='Jitter plot of actual vs predicted values of quality')+
+  geom_abline()
+
+```
+
+## Accuracy within range of + or - 1
+When I give the accuracy a range of + or - 1, it goes up to 95%.  There is actually no reason to round the accuracy to the nearest integer, however when I ran this part of the model without rounding, I only got a 90% accuracy.  This is of marginal value since over 90% of the quality ratings are in the 5-7 range, so if you just guessed 6 +or- 1 for every observation you would get about 93%.  
+
+```{r accuracy within plus or minus 1}
+# what about trying to predict the quality within + or - 1
+train_acc_range <- mean( (round(y_hat_train) <= rw_comb_train$quality+1) & (round(y_hat_train) >= rw_comb_train$quality - 1))
+test_acc_range <- mean( (round(y_hat_test) <= rw_comb_test$quality+1) & (round(y_hat_test) >= rw_comb_test$quality - 1))
+accuracy_results <- bind_rows(accuracy_results, data_frame(method = "Linear regresssion on training set with +- 1 range", 
+                                                           Accuracy = train_acc_range))
+accuracy_results <- bind_rows(accuracy_results, data_frame(method = "Linear regression on test set with +-1 range", 
+                                                           Accuracy = test_acc_range))
+accuracy_results %>% knitr::kable()
+```
+
+## Variable Selection
+Variable selection is an important aspect of linear regression.  There are several methods for variable selection, such as elastic net, ridge, and lasso.  In this case, I took a simplistic approach and removed the two variables with p-values over .05, citric acid and chlorides.  This is not guaranteed to give us a better prediction, but it is worth a try.  In this case, removing these two attributes, citric acid and chlorides, did not signficantly change the RMSE nor the accuracy.  They actually got slightly worse.   
+
+
+```{r variable selection}
+# variable selection
+var_sel_model <- lm(quality~., data=rw_comb_train[, -c(3,5)])
+summary(var_sel_model)
+
+y_hat_train_var_sel <- predict(var_sel_model)
+
+y_hat_test_var_sel <- predict(var_sel_model, rw_comb_test)
+
+#add variable selection rmse to rmse_results table
+rmse_train_Var_sel <- sqrt(mean((rw_comb_train$quality - y_hat_train_var_sel)^2))
+rmse_test_var_sel <- sqrt(mean((rw_comb_test$quality - y_hat_test_var_sel)^2))
+
+rmse_results <- bind_rows(rmse_results, data_frame(method = "Linear regression after variable selection on the training set",
+                                                   RMSE = rmse_train_Var_sel))
+rmse_results <- bind_rows(rmse_results, data_frame(method = "Linear regression after variable selection on the test set",
+                                                   RMSE = rmse_test_var_sel))
+rmse_results %>% knitr::kable()
+
+
+rw_comb_test_pred_Var_sel <- rw_comb_test %>% mutate(y_hat = y_hat_test_var_sel)
+
+# what percentage of the rating can be predicted exactly from the rounded y_hat
+train_acc_var_sel <- mean(round(y_hat_train_var_sel) == rw_comb_train$quality)
+test_acc_var_sel <- mean(round(y_hat_test_var_sel) == rw_comb_test$quality)
+accuracy_results <- bind_rows(accuracy_results, data_frame(method = "Linear regresssion on training set after variable selection", 
+                                                           Accuracy = train_acc_var_sel))
+accuracy_results <- bind_rows(accuracy_results, data_frame(method = "Linear regression on test set after variable selection", 
+                                                           Accuracy = test_acc_var_sel))
+# what about trying to predict the quality within + or - 1
+train_acc_var_sel_range <- mean((round(y_hat_train_var_sel) <= rw_comb_train$quality+1) & 
+                                  (round(y_hat_train_var_sel) >= rw_comb_train$quality - 1))
+test_acc_var_sel_range <- mean((round(y_hat_test_var_sel) <= rw_comb_test$quality+1) & 
+                                 (round(y_hat_test_var_sel) >= rw_comb_test$quality - 1))
+
+accuracy_results <- bind_rows(accuracy_results, 
+                              data_frame(method = "Linear regresssion on training set after variable selection with +- 1 range", 
+                                                           Accuracy = train_acc_var_sel_range))
+accuracy_results <- bind_rows(accuracy_results, 
+                              data_frame(method = "Linear regression on test set after variable selection with +-1 range", 
+                                                           Accuracy = test_acc_var_sel_range))
+
+
+accuracy_results %>% knitr::kable()
+```
+
+# Classifiers
+## Logistic Regression
+
+I used logistic regression as the first classifier model to classify red wines and white wines based on the attributes.  Logistic regression predicts the chance something will happen.  Recall with this wine set, we are using red wine to simulate a positive test for a disease.  So I start by rounding.  If the model predicts a value of .5 or greater, round up to 1 and call that prediction for a positive result.  Otherwise round down to zero the prediction is for a negative result.  
+
+However, we can also weigh the cost of a false positive vs. a false negative.  If a patient has a false positive, he she can likely get a second opinion and walk away no harm done, save some temporary period of high stress.  However, if a patient gets a false negative, he/she probably thinks things are fine while the disease is actually getting worse.  So we want to reduce false negatives even at the expense of reducing the overall accuracy.  This is called specificity, the models ability to correctly identify people without the disease.  I created a tibble that measures specificity, and also includes the false negatives and false positives.  The goal is to reduce the false negatives, but the trade off is more false positives.
+
+
+One thing I like about logistic regression is we can control the threshold that rounds to 1 or stays 0.  We don't have to simply round off at .5.  For illustrative purposes, I used .1 as the round off point.  Anything prediction by the model greater than or equal to .1 is round to 1, and anything less is a zero.  We reduce the false negatives by 7, but at the expense of increasing the false positives by 14. Each false negative reduced causes two false positives.  Whether is a good trade off depends.  The point is to show how logistic regression can be used to find not only the best overall accuracy, but also the best specificity.  You could also optimize the sensitivity by setting a threshold closer to 1, and reduce false positives.  
+```{r}
+# logistic regression as a classifier
+logreg <- glm(class~., data=rw_comb_train, family=binomial(link = "logit"))
+summary(logreg)
+y_hat_train_log <- round(predict(logreg, type = 'response'))
+y_hat_test_log <- round(predict(logreg, newdata=rw_comb_test, type = 'response'))
+
+train_log_acc <- mean(y_hat_train_log == rw_comb_train$class)
+test_log_acc <- mean(y_hat_test_log == rw_comb_test$class)
+
+#confusion matrix on test set
+confusionMatrix(as.factor(y_hat_test_log), as.factor(rw_comb_test$class))
+log_conf_mat <- as.matrix(confusionMatrix(as.factor(y_hat_test_log), as.factor(rw_comb_test$class)))
+
+# Manually calculate the specificity 
+logreg_spec <- log_conf_mat[2,2] / (log_conf_mat[2,2] + log_conf_mat[1,2])
+
+rw_classifier_results <- data_frame(Method = "Logistic Regression with prediction rounded", Specificity = logreg_spec,
+                                    False_Negatives = log_conf_mat[1,2],
+                                    False_Positives = log_conf_mat[2,1])
+
+# get the specificity to be 1
+y_hat_test_log_spec <- as.numeric(predict(logreg, newdata=rw_comb_test, type = 'response')>=.1)
+confusionMatrix(as.factor(y_hat_test_log_spec), as.factor(rw_comb_test$class))
+log_spec_conf_mat <- as.matrix(confusionMatrix(as.factor(y_hat_test_log_spec), as.factor(rw_comb_test$class)))
+
+logreg_spec_adjusted <- log_spec_conf_mat[2,2] / (log_spec_conf_mat[2,2] + log_spec_conf_mat[1,2])
+rw_classifier_results <- bind_rows(rw_classifier_results, 
+                                   data_frame(Method = 'Logistc Regression with prediction adjusted for better specification',
+                                              Specificity = logreg_spec_adjusted,
+                                              False_Negatives = log_spec_conf_mat[1,2],
+                                              False_Positives = log_spec_conf_mat[2,1]))
+rw_classifier_results %>% knitr::kable()
+```
+
+## Support Vector Machine
+
+SVMs are another common classier.  I just ran the basic model here.  Vanilla dot is my kernel of choice for linear models, but there are several to choose from.  C controls optimized the tradeoff between he decision boundary and penalty for mis-classifying points.  I experimented different values of C and didn't see much change so I selected 1.  This turns out to be the best overall model overall.  
+
+```{r support vector machine}
+#support vector machine
+svm_mod <- ksvm(class~., data = rw_comb_train,
+                type="C-svc", kernel="vanilladot", C=1)
+y_hat_test_svm <- predict(svm_mod, newdata=rw_comb_test)
+confusionMatrix(as.factor(y_hat_test_svm), as.factor(rw_comb_test$class))
+svm_conf_mat <- as.matrix(confusionMatrix(as.factor(y_hat_test_svm), as.factor(rw_comb_test$class)))
+svm_spec <- svm_conf_mat[2,2]/(svm_conf_mat[1,2] + svm_conf_mat[2,2])
+
+rw_classifier_results <- bind_rows(rw_classifier_results, 
+                                   data_frame(Method = 'Support Vector Machine',
+                                              Specificity = svm_spec,
+                                              False_Negatives = svm_conf_mat[1,2],
+                                              False_Positives = svm_conf_mat[2,1]))
+rw_classifier_results %>% knitr::kable()
+```
+## K nearest neighbor
+
+K nearest neighbor is another good classifier model.  I set up a for loop to test values from k from 1 to 30.  I got the best specificity for values of 1 through 4.  This means the same number of false negatives for each of these values of k.  So the next step is to run the model again with each of these four values and see which one gives the best overall accuracy, but they turned out to be all the same so I used k=4.  While not quite as good as the SVM, this is a very good model.  
+
+```{r knn}
+# knn testing for best k
+kmax <- 30
+specificity <- rep(0,kmax)
+for (k in 1:kmax) {
+  model <- kknn(formula = class~.,train = rw_comb_train,test=rw_comb_test,
+                   k=k) # number of neighbors
+  y_hat <- fitted(model)
+  conf_mat <- as.matrix(confusionMatrix(as.factor(y_hat), as.factor(rw_comb_test$class)))
+  specificity[k] <- conf_mat[2,2]/(conf_mat[1,2]+conf_mat[2,2])
+}
+print("Specificity rates for values of k from 1 to 30")
+specificity
+
+print('Best specificity rate')
+specificity[which.max(specificity)]
+
+# set up knn model with k = 4
+knn_model <- kknn(formula = class~.,train = rw_comb_train,test=rw_comb_test,
+              k = 4) # number of neighbors
+y_hat_knn <- fitted(knn_model)
+confusionMatrix(as.factor(y_hat_knn), as.factor(rw_comb_test$class))
+
+knn_conf_mat <- as.matrix(confusionMatrix(as.factor(y_hat_knn), as.factor(rw_comb_test$class)))
+knn_spec <- knn_conf_mat[2,2] / (knn_conf_mat[2,2] + knn_conf_mat[1,2])
+rw_classifier_results <- bind_rows(rw_classifier_results, 
+                                   data_frame(Method = 'K nearest neighbor with k=4',
+                                              Specificity = knn_spec,
+                                              False_Negatives = knn_conf_mat[1,2],
+                                              False_Positives = knn_conf_mat[2,1]))
+rw_classifier_results %>% knitr::kable()
+```
+
+## Decision Tree as a classifer
+Decision trees are another good classifier, although in this case the tree did not perform as well as the other models.  It is interesting to look at the attributes the tree uses for branches.  For example, the chlorides attribute is one that removed from the linear regression model because the p-value was above the .05 threshold, yet in the decision tree it the the top branch and arguably the most important variable.  Similar to logistic regression the output is a figure between the categorical values, which in this case is a fraction between 0 and 1.  Therefore, we do standard rounding or round at specific threshhold to reduce false negative or false positives in the even either is more important than overall accuracy.
+
+It turns out this model is not good.  There are 22 false negatives compared to other classifiers that had only 6 or 7.  And there are more false positives as well.  I adjusted the threshold to .05, and reduced the false negatives from 22 to 15, but at relatively high cost of false positives. While false positives are less important, each false positive represent telling somebody they might have a disease as a result of the test being too conservative.
+
+Another benefit of decision trees is you can prune the tree to a selected number of leaves.  I pruned the tree to use only 4 leaves.  The model only used two variables, chlorides and total sulfur dioxide, and still came up with the same results as the ordinal tree.  While it is not the best model, the results pretty good when considering it ony uses 2 out of 12 predictors. 
+
+```{r Decision tree}
+#tree for classification
+
+wine_tree <- tree(class~., data=rw_comb_train)
+par(cex = .7)
+plot(wine_tree)
+text(wine_tree)
+wine_tree$frame
+y_hat_tree <- round(predict(wine_tree, newdata=rw_comb_test))
+print('Confusion matrix for tree classifier with prediction rounded to 0 or 1:')
+print(confusionMatrix(as.factor(y_hat_tree[,2]), as.factor(rw_comb_test$class)))
+tree_conf_mat <- as.matrix(confusionMatrix(as.factor(y_hat_tree[,2]), as.factor(rw_comb_test$class)))
+tree_spec <- tree_conf_mat[2,2] / (tree_conf_mat[2,2] + tree_conf_mat[1,2])
+rw_classifier_results <- bind_rows(rw_classifier_results, 
+                                   data_frame(Method = 'Decision tree classifier',
+                                              Specificity = tree_spec,
+                                              False_Negatives = tree_conf_mat[1,2],
+                                              False_Positives = tree_conf_mat[2,1]))
+
+y_hat_tree_spec <- as.integer(predict(wine_tree, newdata=rw_comb_test)>=.05)
+print('Confusion matrix for tree classiier with rounding threshold set to .05 instead of .5 for better specificity:')
+print(confusionMatrix(as.factor(y_hat_tree_spec[1301:2600]), as.factor(rw_comb_test$class)))
+tree_conf_mat_adj <- as.matrix(confusionMatrix(as.factor(y_hat_tree_spec[1301:2600]), as.factor(rw_comb_test$class)))
+tree_spec_adj <- tree_conf_mat_adj[2,2] / (tree_conf_mat_adj[2,2] + tree_conf_mat_adj[1,2])
+rw_classifier_results <- bind_rows(rw_classifier_results, 
+                                   data_frame(Method = 'Decision tree classifier adjusted for best specificity',
+                                              Specificity = tree_spec_adj,
+                                              False_Negatives = tree_conf_mat_adj[1,2],
+                                              False_Positives = tree_conf_mat_adj[2,1]))
+
+
+#prune the tree
+termnodes <- 4
+prune.data <- prune.tree(wine_tree, best = termnodes)
+plot(prune.data)
+text(prune.data)
+print(prune.data$frame)
+y_hat_tree_prune <- round(predict(wine_tree, newdata=rw_comb_test))
+print('Confusion matrix for pruned decision tree, only 4 terminal nodes:')
+print(confusionMatrix(as.factor(y_hat_tree[,2]), as.factor(rw_comb_test$class)))
+
+tree_conf_mat_prune <- as.matrix(confusionMatrix(as.factor(y_hat_tree[,2]), as.factor(rw_comb_test$class)))
+tree_spec_prune <- tree_conf_mat_prune[2,2] / (tree_conf_mat_prune[2,2] + tree_conf_mat_prune[1,2])
+rw_classifier_results <- bind_rows(rw_classifier_results, 
+                                   data_frame(Method = 'Decision tree classifier pruned',
+                                              Specificity = tree_spec_adj,
+                                              False_Negatives = tree_conf_mat_prune[1,2],
+                                              False_Positives = tree_conf_mat_prune[2,1]))
+rw_classifier_results %>% knitr::kable()
+```
+## Random Forest as a classifier
+Random forest is also a good classifier.  I often find that it provides a better model that decision trees.  It does have a couple of drawbacks.  First of all, sometimes you need to use a lot of trees to build the best model, but this can be a very slow process process.  I like to use 1000 if it doesn't take a long time to run, although I typically don't see much of change between 500 and 1000.  Also, you can't analyze the tree results as well as a decision tree where you can see exactly what the model is doing.  
+
+The mtry is the number of variables available for splitting at tree node.  I found an mtry of have the number of variables is good.  There are 12 predictor variables, so I used an mtyr of 6.  You could set up a for loop and tune this to find the best mtry, but it starts to get very costly in terms of run time.  
+
+Finally, while you can't see a decision tree, you can still print out the importance of each variable.  The higher numbers are better.  As you can see,, chlorides and total sulfur dioxide, are the most important, which are the same two variables the decision tree used.  
+
+Finally, random forest does give us a better result than decision tree, although it is still not as good as some of the other models.  
+```{r random forest classifier}
+# random forest classification 
+set.seed(12)
+wine_rf <- randomForest(class~., data = rw_comb_train, mtry = 6,
+                        ntrees=1000, importance = TRUE)
+y_hat_rf <- predict(wine_rf, newdata =  rw_comb_test)
+importance(wine_rf)
+print(confusionMatrix(as.factor(y_hat_rf), as.factor(rw_comb_test$class)) )             
+
+rf_conf_mat <- as.matrix(confusionMatrix(as.factor(y_hat_rf), as.factor(rw_comb_test$class))    )
+
+rf_spec <- rf_conf_mat[2,2] / (rf_conf_mat[2,2]+rf_conf_mat[1,2])
+rw_classifier_results <- bind_rows(rw_classifier_results, 
+                                   data_frame(Method = 'Random Forest classifier',
+                                              Specificity = rf_spec,
+                                              False_Negatives = rf_conf_mat[1,2],
+                                              False_Positives = rf_conf_mat[2,1]))
+rw_classifier_results %>% knitr::kable()
+```
+
+
+## Decision tree as amount predictor
+
+As mentioned the decision tree can also be used as a predictor. In this case neither the accuracy nor the RMSE show that this is best model.  The RMSE is better than the mean as the predictor, but worse than the linear regression model.  Likewise the accuracy is not as good as any of the linear regression models previously run, although it fairly close, all be in the low 50s%.
+
+It is also interesting to observe that the predictors used here (alcohol, volatile acidity and free sulfur dioxide) are not the same as the predictors used in for the classification tree model.  
+```{r decision tree for quality rating}
+#tree for quality prediction
+wine_tree_acc <- tree(quality~., data=rw_comb_train)
+plot(wine_tree_acc)
+text(wine_tree_acc)
+wine_tree$frame
+y_hat_tree_acc <- round(predict(wine_tree_acc, newdata=rw_comb_test))     
+
+tree_acc <- mean(y_hat_tree_acc == rw_comb_test$quality)
+tree_rmse <-   sqrt(mean((y_hat_tree_acc - rw_comb_test$quality)^2))
+
+accuracy_results <- bind_rows(accuracy_results, data_frame(method = "Decision tree on test set", Accuracy = tree_acc))
+rmse_results <- bind_rows(rmse_results, data_frame(method="Decision tree on test set", RMSE = tree_rmse))
+                              
+accuracy_results %>% knitr::kable()
+rmse_results  %>% knitr::kable()
+```
+## Random forest as continuous predictor
+
+Previously, we just say how the decision tree could be use to predict a continuous values, which were then rounded to discrete values, but the model did not perform as well as linear regression.   As with the decision tree we see the three most important predictors are alcohol, volatile acidity and free sulfur dioxide.  
+
+What is most interesting about this model is the accuracy jumped up to 69% making it far and above the best predictor.  Same for RMSE, it dropped to .64 making it the best compared to any of the other models.  This is a really good way to finish.  I would certainly recommend this model for predicting quality.  
+
+```{r random forest as continous predictor }
+
+#random forest for quality prediction         
+set.seed(12)
+wine_rf_qual <- randomForest(quality~., data = rw_comb_train, mtry = 6,
+                        ntrees=1000, importance = TRUE)
+y_hat_rf_qual <- round(predict(wine_rf_qual, newdata =  rw_comb_test))
+
+importance(wine_rf_qual)   
+rf_acc <- mean(y_hat_rf_qual == rw_comb_test$quality)
+rf_rmse <-   sqrt(mean((y_hat_rf_qual - rw_comb_test$quality)^2))
+accuracy_results <- bind_rows(accuracy_results, data_frame(method = "Random forest on test set", Accuracy = rf_acc))
+rmse_results <- bind_rows(rmse_results, data_frame(method="Random forest on test set", RMSE = rf_rmse))
+
+accuracy_results %>% knitr::kable()
+rmse_results %>% knitr::kable()
+```
+
+# Conclusion
+
+I chose this set data set, actually two sets, so I could run a continuous predictor as well as binary classifier.  The conclusion is different models performed differently.  
+
+For the classification models, the support vector machine did the best followed closely by k nearest neighbors. My assumption is false negatives are more costly than false positives, so specificity is often more important that overall accuracy.  This is the case when testing for a disease, which is why I focused on maximizing specificity by minimizing false negatives.  Also, while I got a slightly better performance from the SVM, it really came down to a single false negative and 3 false positives in the test set of 1300 observations.  A way to further evaluate these two models would be through cross validation.  I could also alter the size of the test set.  I partitioned 20% of the observations for testing, but I could try other values between 15% and 30%.  I set the seed to 12 for the data partition, but other seeds could be used to see if the outputs are truly representative of the data or there is a random effect of a particular seed.  However, the seed is not typically used as a tuning parameter.  Cross validation should account for most of the random variation.  While SVM and KNN yielded the best results, logistic regression, decision trees and random forest are also good models models for classification.  In particular, for those latter 3, the threshold can adjusted.  When looking at the ensemble, the overall best specificity was actually logistic regression, only 4 false negatives, however the cost in false positives and therefore overall accuracy starts starts to get high.  
+
+For the continuous prediction, it is a little bit harder to determine how well the model is performing.  Using the mean and median as the predicted value for all observations is a good way to establish a base line.  Models such as linear regression should yield a lower RMSE, which is what we got in this analysis.  Decision trees and random forest are interesting models because they can be used for both continuous prediction and classification.  Here we saw that the decision tree did not perform as well as linear regression, but random forest is by the far the best model.  I also tried evaluated the accuracy rate of the prediction which is not common.  However, there were only 7 possible outcomes, with the fast majority being the 3 outcomes in the middle.  The accuracy results were consistent with the RMSE.  Models with lower RMSE had better accuracy rates.  It was amazing to see how well random forest could prediction specific outcomes.  
+
+# References
+
+1.	UCI Machine Learning Repository:
+<https://archive.ics.uci.edu/ml/datasets/wine+quality>
+
+2.	R-Studio Help and Tutorials
+
